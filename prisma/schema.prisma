@@ -1,0 +1,390 @@
+// emeinfotech.ai — Real-Estate Portal
+// Multi-tenant schema (PRD Part 3/4). Listings/properties/geo are SHARED (global IDX pool);
+// users, agents, teams, leads, favourites, saved searches, consent, billing are TENANT-SCOPED.
+// SQLite for the seed build; Postgres+PostGIS-portable for production.
+// Enums are modelled as String (SQLite has no native enums) with documented value sets.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Tenancy ----------
+model Tenant {
+  id           String   @id @default(cuid())
+  slug         String   @unique
+  name         String
+  tagline      String?
+  // white-label branding (applied at runtime as CSS variables)
+  brandColor    String  @default("#0f3d4c")
+  brandColor700 String  @default("#0a2e3a")
+  brandColor50  String  @default("#e7f0f2")
+  accentColor   String  @default("#d6334b")
+  logoText      String? // short logo glyph; defaults to first letter of name
+  // SaaS
+  subdomain    String   @unique
+  plan         String   @default("starter") // starter|team|brokerage
+  status       String   @default("active")  // active|suspended|cancelled
+  feedTypes    String   @default("IDX,VOW")  // data entitlements
+  isDefault    Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  users          User[]
+  brokerages     Brokerage[]
+  teams          Team[]
+  agents         Agent[]
+  leads          Lead[]
+  consents       Consent[]
+  vowAcceptances VowAcceptance[]
+  subscription   Subscription?
+  domains        Domain[]
+  auditLogs      AuditLog[]
+}
+
+model Brokerage {
+  id             String  @id @default(cuid())
+  tenantId       String
+  tenant         Tenant  @relation(fields: [tenantId], references: [id])
+  legalName      String
+  tradeName      String?
+  brokerOfRecord String
+  recoId         String?
+  routingStrategy String @default("round-robin") // round-robin|first-to-claim|geographic
+  roundRobinCursor Int   @default(0)
+  agents         Agent[]
+  teams          Team[]
+}
+
+model Team {
+  id               String  @id @default(cuid())
+  tenantId         String
+  tenant           Tenant  @relation(fields: [tenantId], references: [id])
+  brokerageId      String
+  brokerage        Brokerage @relation(fields: [brokerageId], references: [id])
+  name             String
+  routingStrategy  String? // null = inherit brokerage
+  roundRobinCursor Int     @default(0)
+  agents           Agent[]
+}
+
+model Agent {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant    @relation(fields: [tenantId], references: [id])
+  brokerageId String
+  brokerage   Brokerage @relation(fields: [brokerageId], references: [id])
+  teamId      String?
+  team        Team?     @relation(fields: [teamId], references: [id])
+  userId      String?   @unique
+  user        User?     @relation(fields: [userId], references: [id])
+  name        String
+  title       String   @default("Sales Representative")
+  phone       String?
+  email       String?
+  photoUrl    String?
+  bio         String?
+  region      String?  // neighbourhood slug / city for geographic routing
+  recoVerified Boolean @default(true)
+  active      Boolean  @default(true)
+  isTeamLead  Boolean  @default(false)
+  listings    Listing[]
+  leads       Lead[]
+  leadEvents  LeadEvent[]
+}
+
+// ---------- Consumers / staff ----------
+// role: "platform_admin" | "brokerage_admin" | "team_lead" | "agent" | "consumer"
+model User {
+  id            String   @id @default(cuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id])
+  email         String
+  passwordHash  String
+  name          String?
+  role          String   @default("consumer")
+  emailVerified Boolean  @default(false)
+  vowAcceptedAt DateTime?
+  createdAt     DateTime @default(now())
+
+  favourites    Favourite[]
+  savedSearches SavedSearch[]
+  consents      Consent[]
+  vowAcceptances VowAcceptance[]
+  leads         Lead[]
+  agent         Agent?
+  auditLogs     AuditLog[] @relation("ActorAudit")
+
+  @@unique([tenantId, email])
+}
+
+// CASL ledger. type: "implied" | "express"; channel: "email"|"sms"|"push"; purpose: "alert"|"nurture"|"newsletter"
+model Consent {
+  id           String   @id @default(cuid())
+  tenantId     String
+  tenant       Tenant   @relation(fields: [tenantId], references: [id])
+  userId       String
+  user         User     @relation(fields: [userId], references: [id])
+  type         String
+  channel      String
+  purpose      String
+  source       String
+  grantedAt    DateTime @default(now())
+  expiresAt    DateTime?
+  unsubscribedAt DateTime?
+}
+
+model VowAcceptance {
+  id         String   @id @default(cuid())
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id])
+  userId     String
+  user       User     @relation(fields: [userId], references: [id])
+  version    String   @default("1.0")
+  acceptedAt DateTime @default(now())
+  ip         String?
+}
+
+// ---------- Geo (shared) ----------
+model Neighbourhood {
+  id            String   @id @default(cuid())
+  slug          String   @unique
+  name          String
+  city          String   @default("Mississauga")
+  citySlug      String   @default("mississauga")
+  province      String   @default("ON")
+  lat           Float
+  lng           Float
+  about         String
+  population     Int
+  medianAge      Int
+  medianIncome   Int
+  ownerPct       Int      // % owner-occupied
+  walkScore      Int
+  transitScore   Int
+  bikeScore      Int
+  ageBuckets     String   // JSON: {"0-14":16,"15-19":9,...}
+  schools        School[]
+  listings       Listing[]
+}
+
+// type: "Elementary" | "Secondary"
+model School {
+  id              String   @id @default(cuid())
+  neighbourhoodId String
+  neighbourhood   Neighbourhood @relation(fields: [neighbourhoodId], references: [id])
+  name            String
+  type            String
+  rating          Float
+  lat             Float
+  lng             Float
+}
+
+// ---------- Listings (shared) ----------
+model CanonicalProperty {
+  id          String  @id @default(cuid())
+  address     String
+  unit        String?
+  city        String  @default("Mississauga")
+  province    String  @default("ON")
+  postalCode  String?
+  lat         Float
+  lng         Float
+  propertyType String
+  listings    Listing[]
+}
+
+// status: "Active"|"Pending"|"Sold"|"Leased"|"Expired"|"Terminated"
+// mode: "Sale"|"Rent"  feedType: "IDX"|"VOW"
+model Listing {
+  id                   String   @id @default(cuid())
+  canonicalPropertyId  String
+  canonicalProperty    CanonicalProperty @relation(fields: [canonicalPropertyId], references: [id])
+  neighbourhoodId      String
+  neighbourhood        Neighbourhood @relation(fields: [neighbourhoodId], references: [id])
+  agentId              String
+  agent                Agent    @relation(fields: [agentId], references: [id])
+
+  sourceBoard          String   @default("TRREB")
+  feedType             String   @default("IDX")
+  listingBrokerageCredit String @default("emeinfotech.ai Realty Inc., Brokerage")
+  mlsNumber            String   @unique
+
+  status               String   @default("Active")
+  mode                 String   @default("Sale")
+  listPrice            Int
+  soldPrice            Int?
+  soldDate             DateTime?
+
+  beds                 Int
+  bedsPlus             Int      @default(0)
+  baths                Int
+  parking              Int      @default(0)
+  sqftMin              Int
+  sqftMax              Int
+  propertyType         String   // "Detached"|"Semi-Detached"|"Townhouse"|"Condo Apt"|"Condo Townhouse"
+  lotSize              String?
+  maintenanceFee       Int?
+  taxesAnnual          Int?
+  description          String
+  daysOnMarket         Int      @default(1)
+  listedAt             DateTime @default(now())
+  isFeatured           Boolean  @default(false)
+  openHouse            String?  // JSON: {"day":"Sat","time":"2:00-4:00pm"}
+  createdAt            DateTime @default(now())
+
+  media       ListingMedia[]
+  priceEvents PriceEvent[]
+  favourites  Favourite[]
+  leads       Lead[]
+  bookings    Booking[]
+}
+
+model ListingMedia {
+  id         String  @id @default(cuid())
+  listingId  String
+  listing    Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  url        String
+  caption    String?
+  order      Int     @default(0)
+  isVowGated Boolean @default(false)
+}
+
+// event: "Listed"|"PriceChange"|"Sold"|"Leased"|"Terminated"
+model PriceEvent {
+  id        String   @id @default(cuid())
+  listingId String
+  listing   Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  date      DateTime
+  event     String
+  price     Int
+}
+
+// ---------- Engagement (tenant-scoped via user) ----------
+model Favourite {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  listingId String
+  listing   Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, listingId])
+}
+
+model SavedSearch {
+  id             String   @id @default(cuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id])
+  name           String
+  queryJson      String   // serialized filter state
+  alertFrequency String   @default("daily") // "instant"|"daily"|"weekly"|"off"
+  channel        String   @default("email")
+  createdAt      DateTime @default(now())
+}
+
+// type: "buyer"|"seller"|"renter"  status: "new"|"contacted"|"qualified"|"closed"
+model Lead {
+  id            String   @id @default(cuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id])
+  userId        String?
+  user          User?    @relation(fields: [userId], references: [id])
+  type          String
+  status        String   @default("new")
+  name          String
+  email         String
+  phone         String?
+  message       String?
+  listingId     String?
+  listing       Listing? @relation(fields: [listingId], references: [id])
+  assignedAgentId String?
+  assignedAgent Agent?   @relation(fields: [assignedAgentId], references: [id])
+  region        String?  // neighbourhood slug for geographic routing
+  claimedAt     DateTime?
+  slaDueAt      DateTime?
+  sourcePage    String?
+  utm           String?  // JSON
+  createdAt     DateTime @default(now())
+
+  events        LeadEvent[]
+}
+
+// Routing / lifecycle audit trail. type: "created"|"routed"|"claimed"|"reassigned"|"status"|"note"
+model LeadEvent {
+  id        String   @id @default(cuid())
+  leadId    String
+  lead      Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  type      String
+  detail    String?
+  agentId   String?
+  agent     Agent?   @relation(fields: [agentId], references: [id])
+  createdAt DateTime @default(now())
+}
+
+model Booking {
+  id            String   @id @default(cuid())
+  listingId     String
+  listing       Listing  @relation(fields: [listingId], references: [id])
+  name          String
+  email         String
+  phone         String?
+  preferredTime String?
+  message       String?
+  status        String   @default("requested")
+  createdAt     DateTime @default(now())
+}
+
+// ---------- SaaS: billing, domains, audit ----------
+model Subscription {
+  id               String  @id @default(cuid())
+  tenantId         String  @unique
+  tenant           Tenant  @relation(fields: [tenantId], references: [id])
+  plan             String  @default("starter")  // starter|team|brokerage
+  seats            Int     @default(1)
+  status           String  @default("trialing") // trialing|active|past_due|canceled
+  pricePerSeat     Int     @default(99)          // CAD / seat / mo
+  province         String  @default("ON")        // for sales-tax calc
+  currentPeriodEnd DateTime?
+  createdAt        DateTime @default(now())
+}
+
+model Domain {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  host      String   @unique
+  isPrimary Boolean  @default(false)
+  verified  Boolean  @default(false)
+  sslStatus String   @default("pending") // pending|issued|failed
+  createdAt DateTime @default(now())
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  tenantId    String?
+  tenant      Tenant?  @relation(fields: [tenantId], references: [id])
+  actorUserId String?
+  actor       User?    @relation("ActorAudit", fields: [actorUserId], references: [id])
+  action      String   // impersonate.start|impersonate.end|tenant.create|tenant.suspend|...
+  target      String?
+  detail      String?
+  createdAt   DateTime @default(now())
+}
+
+// Precomputed monthly market aggregates per city (drives Market Reports charts — like property.ca's sold-price index).
+model MarketStat {
+  id           String   @id @default(cuid())
+  citySlug     String
+  city         String
+  month        DateTime // first day of the month
+  avgSoldPrice Int
+  salesCount   Int
+  avgRentPrice Int
+  rentCount    Int
+
+  @@index([citySlug, month])
+}

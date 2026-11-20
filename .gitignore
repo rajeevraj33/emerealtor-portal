@@ -39,3 +39,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local SQLite DB (316MB, exceeds GitHub 100MB limit; regenerate with npm run db:reset)
+/prisma/*.db
+/prisma/*.db-journal
+
+# Razorpay key image
+rzp-key.jpeg
